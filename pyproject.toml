@@ -1,5 +1,5 @@
 [project]
-name = "opower"
+name = "opower_gql"
 version = "0.9.0"
 license = {text = "Apache-2.0"}
 authors = [
@@ -17,8 +17,8 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/tronikos/opower"
-"Bug Tracker" = "https://github.com/tronikos/opower/issues"
+"Homepage" = "https://github.com/jasperchan/opower_gql"
+"Bug Tracker" = "https://github.com/jasperchan/opower_gql/issues"
 
 [build-system]
 requires = ["setuptools"]
