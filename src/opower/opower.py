@@ -139,15 +139,6 @@ class CostRead:
     end_time: datetime
     consumption: float  # taken from value field, in KWH or THERM/CCF
     provided_cost: float  # in $
-
-
-@dataclasses.dataclass
-class UsageRead:
-    """A read from the meter that has consumption data."""
-
-    start_time: datetime
-    end_time: datetime
-    consumption: float  # taken from consumption.value field, in KWH or THERM/CCF
     received: float
     delivered: float
 
@@ -442,7 +433,7 @@ class Opower:
         aggregate_type: AggregateType,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-    ) -> list[UsageRead]:
+    ) -> list[CostRead]:
         """Get usage data for the selected account in the given date range aggregated by bill/day/hour.
 
         The resolution for gas is typically 'day' while for electricity it's hour or quarter hour.
@@ -454,9 +445,10 @@ class Opower:
         result = []
         for read in reads:
             result.append(
-                UsageRead(
+                CostRead(
                     start_time=datetime.fromisoformat(read["startTime"]),
                     end_time=datetime.fromisoformat(read["endTime"]),
+                    provided_cost=0.0,
                     consumption=read["consumption"]["value"],
                     received=read["energyReceived"]["value"],
                     delivered=read["energyDelivered"]["value"],
@@ -483,7 +475,7 @@ class Opower:
     async def async_get_realtime_usage_reads(
         self,
         account: Account,
-    ) -> list[UsageRead]:
+    ) -> list[CostRead]:
         """Get recent usage data from the "Real Time Usage" API.
 
         The realtime API returns data in approximately the last day in 15
@@ -505,7 +497,7 @@ class Opower:
         headers = self._get_headers(account.customer.uuid)
         result = await self._async_get_request(url, {}, headers)
         return [
-            UsageRead(
+            CostRead(
                 start_time=datetime.fromisoformat(read["startTime"]),
                 end_time=datetime.fromisoformat(read["endTime"]),
                 consumption=read["value"],
