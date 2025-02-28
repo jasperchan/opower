@@ -137,10 +137,10 @@ class CostRead:
 
     start_time: datetime
     end_time: datetime
-    consumption: float  # taken from value field, in KWH or THERM/CCF
-    provided_cost: float  # in $
-    received: float
-    delivered: float
+    consumption: float = 0.0  # taken from value field, in KWH or THERM/CCF
+    provided_cost: float = 0.0  # in $
+    received: float = 0.0
+    delivered: float = 0.0
 
 
 def get_supported_utilities() -> list[type["UtilityBase"]]:
@@ -448,7 +448,6 @@ class Opower:
                 CostRead(
                     start_time=datetime.fromisoformat(read["startTime"]),
                     end_time=datetime.fromisoformat(read["endTime"]),
-                    provided_cost=0.0,
                     consumption=read["consumption"]["value"],
                     received=read["energyReceived"]["value"],
                     delivered=read["energyDelivered"]["value"],
