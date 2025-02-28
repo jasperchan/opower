@@ -140,18 +140,20 @@ async def _main() -> None:
                 if args.csv:
                     with open(args.csv, "w", newline="") as csv_file:
                         writer = csv.writer(csv_file)
-                        writer.writerow(["start_time", "end_time", "consumption"])
+                        writer.writerow(["start_time", "end_time", "consumption", "received", "delivered"])
                         for usage_read in usage_data:
                             writer.writerow(
                                 [
                                     usage_read.start_time,
                                     usage_read.end_time,
                                     usage_read.consumption,
+                                    usage_read.received,
+                                    usage_read.delivered,
                                 ]
                             )
                 else:
                     print(
-                        "start_time\tend_time\tconsumption"
+                        "start_time\tend_time\tconsumption\tdelivered\treceived"
                         "\tstart_minus_prev_end\tend_minus_prev_end"
                     )
                     for usage_read in usage_data:
@@ -168,6 +170,8 @@ async def _main() -> None:
                             f"{usage_read.start_time}"
                             f"\t{usage_read.end_time}"
                             f"\t{usage_read.consumption}"
+                            f"\t{usage_read.received}"
+                            f"\t{usage_read.delivered}"
                             f"\t{start_minus_prev_end}"
                             f"\t{end_minus_prev_end}"
                         )

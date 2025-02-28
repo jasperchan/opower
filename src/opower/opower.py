@@ -13,7 +13,7 @@ from aiohttp.client_exceptions import ClientError, ClientResponseError
 import aiozoneinfo
 import arrow
 
-from .const import USER_AGENT
+from .const import USER_AGENT, GetBillingAccountsQuery, GetUsageReadsForDayAndHourQuery
 from .exceptions import ApiException, CannotConnect, InvalidAuth
 from .utilities import UtilityBase
 
@@ -108,6 +108,8 @@ class Account:
     # utility_account_id if unique or uuid
     # https://github.com/home-assistant/core/issues/108260
     id: str
+    # service agreement connection uuid from gql
+    sa_uuid: str
     meter_type: MeterType
     read_resolution: Optional[ReadResolution]
 
@@ -146,6 +148,8 @@ class UsageRead:
     start_time: datetime
     end_time: datetime
     consumption: float  # taken from consumption.value field, in KWH or THERM/CCF
+    received: float
+    delivered: float
 
 
 def get_supported_utilities() -> list[type["UtilityBase"]]:
@@ -188,7 +192,23 @@ class Opower:
         self.access_token: Optional[str] = None
         self.customers: list[Any] = []
         self.user_accounts: list[Any] = []
+        self.service_agreement_connections: list[Any] = []
         self.meters: list[str] = []
+
+    async def _async_gql(self, operation: str, query: str, variables: Optional[dict[str, Any]]) -> Any:
+        headers = self._get_headers()
+        headers['content-type'] = 'application/json'
+        async with self.session.post(
+            f"https://{self._get_subdomain()}.opower.com/{self._get_api_root()}/edge/apis/dsm-graphql-v1/cws/graphql",
+                json={
+                    "operationName": operation,
+                    "variables": variables,
+                    "query": query
+                },
+                headers=headers
+        ) as resp:
+            result = await resp.json()
+            return result
 
     async def async_login(self) -> None:
         """Login to the utility website and authorize opower.com for access.
@@ -200,7 +220,6 @@ class Opower:
             self.access_token = await self.utility.async_login(
                 self.session, self.username, self.password, self.optional_mfa_secret
             )
-
         except ClientResponseError as err:
             if err.status in (401, 403):
                 raise InvalidAuth(err)
@@ -214,6 +233,7 @@ class Opower:
 
         Typically one account for electricity and one for gas.
         """
+        service_connections = await self._async_get_service_agreement_connections()
         accounts = []
         for customer in await self._async_get_customers():
             utility_accounts = []
@@ -229,12 +249,14 @@ class Opower:
                     if utility_account_ids.count(utility_account_id) == 1
                     else account_uuid
                 )
+                sa_uuid = [x for x in service_connections if x["utilityId"] == id][0]["uuid"]
                 accounts.append(
                     Account(
                         customer=Customer(uuid=customer["uuid"]),
                         uuid=account_uuid,
                         utility_account_id=utility_account_id,
                         id=id,
+                        sa_uuid=sa_uuid,
                         meter_type=MeterType(account["meterType"]),
                         read_resolution=ReadResolution(account["readResolution"]),
                     )
@@ -294,6 +316,7 @@ class Opower:
                             uuid=account_uuid,
                             utility_account_id=utility_account_id,
                             id=id,
+                            sa_uuid="",
                             meter_type=MeterType(forecast["meterType"]),
                             read_resolution=None,
                         ),
@@ -347,6 +370,26 @@ class Opower:
 
         assert self.user_accounts
         return self.user_accounts
+
+
+    async def _async_get_service_agreement_connections(self) -> list[Any]:
+        if not self.service_agreement_connections:
+            result = await self._async_gql(
+                "GetBillingAccounts",
+                GetBillingAccountsQuery,
+                {
+                    "first": 25,
+                    "onlyActive": False,
+                    "locale": "en-US"
+                }
+            )
+            for billing_account in result["data"]["billingAccountsConnection"]["edges"]:
+                for connection in billing_account["node"]["serviceAgreementsConnection"]["edges"]:
+                    self.service_agreement_connections.append(connection["node"])
+
+        assert self.service_agreement_connections
+        return self.service_agreement_connections
+
 
     async def async_get_cost_reads(
         self,
@@ -415,6 +458,8 @@ class Opower:
                     start_time=datetime.fromisoformat(read["startTime"]),
                     end_time=datetime.fromisoformat(read["endTime"]),
                     consumption=read["consumption"]["value"],
+                    received=read["energyReceived"]["value"],
+                    delivered=read["energyDelivered"]["value"],
                 )
             )
         return result
@@ -527,6 +572,89 @@ class Opower:
             result = reads + result
             req_end = req_start.shift(days=-1)
 
+    async def _async_fetch_usage_gql(
+            self,
+            account: Account,
+            aggregate_type: AggregateType,
+            start_date: Union[datetime, arrow.Arrow, None] = None,
+            end_date: Union[datetime, arrow.Arrow, None] = None,
+    ) -> list[Any]:
+        params = {
+            "resolution": aggregate_type.value.upper(),
+            "timeInterval": f"{start_date.format('YYYY-MM-DDTHH:mm:ssZZ')}/{end_date.format('YYYY-MM-DDTHH:mm:ssZZ')}",
+            "lastForServicePoints": 50,
+            "aliased": True,
+            "forceLegacyData": False,
+            "customerURN": f"urn:opower:customer:uuid:{account.customer.uuid}",
+            "locale": "en-US",
+            "saUuid": account.sa_uuid
+        }
+        try:
+            result = await self._async_gql(
+                "GetUsageReadsForDayAndHour",
+                GetUsageReadsForDayAndHourQuery,
+                params
+            )
+
+            # Extract reads from each category, defaulting to empty list if not present
+            streams = result["data"]["billingAccountByAuthContext"]["serviceAgreementsConnection"]["edges"][0]["node"]["servicePointsConnection"]["edges"][0]["node"]["readStreams"]
+            net_usage = (streams["netUsage"][0] if streams["netUsage"] else {}).get("reads", [])
+            energy_delivered = (streams["energyDelivered"][0] if streams["energyDelivered"] else {}).get("reads", [])
+            energy_received = (streams["energyReceived"][0] if streams["energyReceived"] else {}).get("reads", [])
+
+            # Create dictionaries mapping timeInterval to measuredAmount value using dict comprehension
+            net_usage_dict = {
+                read["timeInterval"]: read["measuredAmount"]["value"]
+                for read in net_usage
+                if read.get("timeInterval") and read.get("measuredAmount")
+            }
+            energy_delivered_dict = {
+                read["timeInterval"]: read["measuredAmount"]["value"]
+                for read in energy_delivered
+                if read.get("timeInterval") and read.get("measuredAmount")
+            }
+            energy_received_dict = {
+                read["timeInterval"]: read["measuredAmount"]["value"]
+                for read in energy_received
+                if read.get("timeInterval") and read.get("measuredAmount")
+            }
+
+            # Collect all unique timeIntervals
+            all_intervals = sorted(set(
+                list(net_usage_dict.keys()) +
+                list(energy_delivered_dict.keys()) +
+                list(energy_received_dict.keys())
+            ))
+
+            # Create result using list comprehension
+            result = []
+            for interval in all_intervals:
+                start_time, end_time = interval.split('/')
+                result.append({
+                    "startTime": start_time,
+                    "endTime": end_time,
+                    "consumption": {
+                        "value": net_usage_dict.get(interval, 0),
+                        "type": "ACTUAL"
+                    },
+                    "energyDelivered": {
+                        "value": energy_delivered_dict.get(interval, 0),
+                        "type": "ACTUAL"
+                    },
+                    "energyReceived": {
+                        "value": energy_received_dict.get(interval, 0),
+                        "type": "ACTUAL"
+                    }
+                })
+            return list(result)
+        except ApiException as err:
+            # Ignore server errors for BILL requests
+            # that can happen if end_date is before account activation
+            if err.status == 500 and aggregate_type == AggregateType.BILL:
+                _LOGGER.debug("Ignoring error while fetching bill data: %s", err)
+                return []
+            raise err
+
     async def _async_fetch(
         self,
         account: Account,
@@ -535,6 +663,10 @@ class Opower:
         end_date: Union[datetime, arrow.Arrow, None] = None,
         usage_only: bool = False,
     ) -> list[Any]:
+        # added GQL endpoint for energy_received / energy_delivered
+        if usage_only:
+            return await self._async_fetch_usage_gql(account, aggregate_type, start_date, end_date)
+
         if usage_only:
             url = (
                 f"https://{self._get_subdomain()}.opower.com/{self._get_api_root()}"
